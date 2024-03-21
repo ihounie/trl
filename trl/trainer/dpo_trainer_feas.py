@@ -49,11 +49,11 @@ from .utils import (
     peft_module_casting_to_bf16,
     trl_sanitze_kwargs_for_tagging,
 )
+
 # imports necessary for overiding the evaluation loop from transformers
 from transformers.integrations.deepspeed import deepspeed_init
 from transformers.trainer_pt_utils import nested_concat, nested_numpify, find_batch_size, IterableDatasetShard
 from transformers.trainer_utils import has_length, EvalPrediction, denumpify_detensorize
-
 
 
 if is_peft_available():
@@ -67,7 +67,7 @@ if is_deepspeed_available():
     import deepspeed
 
 
-class DPOTrainer(Trainer):
+class DPOfTrainer(Trainer):
     r"""
     Initialize DPOTrainer.
 
@@ -181,7 +181,9 @@ class DPOTrainer(Trainer):
         ref_adapter_name: Optional[str] = None,
         reference_free: bool = False,
         force_use_ref_model: bool = False,
-        clip_loss: Optional[float] = 1e-3,
+        loss_tolerance: float = 1e-3,
+        resilient_alpha: float = 2.0,
+        dual_lr: float = 0.0
     ):
         if model_init_kwargs is None:
             model_init_kwargs = {}
@@ -385,6 +387,14 @@ class DPOTrainer(Trainer):
             train_dataset = train_dataset.map(self.tokenize_row, num_proc=self.dataset_num_proc)
             if eval_dataset is not None:
                 eval_dataset = eval_dataset.map(self.tokenize_row, num_proc=self.dataset_num_proc)
+        
+        self.loss_tolerance = loss_tolerance
+        self.resilient_alpha = resilient_alpha
+        self.dual_lr = dual_lr
+
+        # init multipliers
+        self.multipliers = torch.ones(len(train_dataset))
+
 
         super().__init__(
             model=model,
@@ -426,7 +436,6 @@ class DPOTrainer(Trainer):
                 self.ref_model = self._prepare_deepspeed(self.ref_model)
             else:
                 self.ref_model = self.accelerator.prepare_model(self.ref_model, evaluation_mode=True)
-        self.clip_loss = clip_loss
 
     def _prepare_deepspeed(self, model: PreTrainedModelWrapper):
         # Adapted from accelerate: https://github.com/huggingface/accelerate/blob/739b135f8367becb67ffaada12fe76e3aa60fefd/src/accelerate/accelerator.py#L1473
@@ -499,6 +508,9 @@ class DPOTrainer(Trainer):
             )
 
             self._precomputed_train_ref_log_probs = True
+        # add indexes
+        indexes = np.arange(len(self.train_dataset))
+        self.train_dataset = self.train_dataset.add_column(name="indexes", column=indexes)
 
         return super().get_train_dataloader()
 
@@ -551,6 +563,8 @@ class DPOTrainer(Trainer):
             if self.eval_dataset is not None:
                 self.eval_dataset = eval_dataset
             self._precomputed_eval_ref_log_probs = True
+        indexes = np.arange(len(eval_dataset))
+        eval_dataset = eval_dataset.add_column(name="indexes", column=indexes)
 
         return super().get_eval_dataloader(eval_dataset=eval_dataset)
 
@@ -1017,6 +1031,7 @@ class DPOTrainer(Trainer):
         model,
         batch: Dict[str, Union[List, torch.LongTensor]],
         train_eval: Literal["train", "eval"] = "train",
+        lagrangian: bool = False,
     ):
         """Compute the DPO loss and other metrics for the given batch of inputs for train or test."""
         metrics = {}
@@ -1059,14 +1074,23 @@ class DPOTrainer(Trainer):
         reward_accuracies = (chosen_rewards > rejected_rewards).float()
 
         prefix = "eval_" if train_eval == "eval" else ""
-        metrics[f"{prefix}rewards/chosen/mean"] = chosen_rewards.mean().cpu()
-        metrics[f"{prefix}rewards/rejected/mean"] = rejected_rewards.mean().cpu()
-        metrics[f"{prefix}rewards/accuracies/mean"] = reward_accuracies.mean().cpu()
-        metrics[f"{prefix}rewards/margins/mean"] = (chosen_rewards - rejected_rewards).mean().cpu()
-        metrics[f"{prefix}logps/rejected/mean"] = policy_rejected_logps.detach().mean().cpu()
-        metrics[f"{prefix}logps/chosen/mean"] = policy_chosen_logps.detach().mean().cpu()
-        metrics[f"{prefix}logits/rejected/mean"] = policy_rejected_logits.detach().mean().cpu()
-        metrics[f"{prefix}logits/chosen/mean"] = policy_chosen_logits.detach().mean().cpu()
+        metrics[f"{prefix}rewards/chosen"] = chosen_rewards.mean().cpu()
+        metrics[f"{prefix}rewards/rejected"] = rejected_rewards.mean().cpu()
+        metrics[f"{prefix}rewards/accuracies"] = reward_accuracies.mean().cpu()
+        metrics[f"{prefix}rewards/margins"] = (chosen_rewards - rejected_rewards).mean().cpu()
+        metrics[f"{prefix}logps/rejected"] = policy_rejected_logps.detach().mean().cpu()
+        metrics[f"{prefix}logps/chosen"] = policy_chosen_logps.detach().mean().cpu()
+        metrics[f"{prefix}logits/rejected"] = policy_rejected_logits.detach().mean().cpu()
+        metrics[f"{prefix}logits/chosen"] = policy_chosen_logits.detach().mean().cpu()
+
+        if lagrangian:
+            losses = losses*self.multipliers[batch["indexes"]].to(losses.device)
+            # update multiplier
+            with torch.no_grad():
+                self.multipliers[batch["indexes"]] = self.multipliers[batch["indexes"]] + self.dual_lr * (losses.to(self.multipliers.device)-self.loss_tolerance-self.multipliers[batch["indexes"]]/self.resilient_alpha)
+                # clip at zero
+                self.multipliers[batch["indexes"]] = torch.clip(self.multipliers[batch["indexes"]], min=0)
+
 
         return losses.mean(), metrics, losses
 
@@ -1085,10 +1109,9 @@ class DPOTrainer(Trainer):
         compute_loss_context_manager = torch.cuda.amp.autocast if self._peft_has_been_casted_to_bf16 else nullcontext
 
         with compute_loss_context_manager():
-            loss, metrics, losses = self.get_batch_loss_metrics(model, inputs, train_eval="train")
-            
-            if self.clip_loss is not None:
-                loss = torch.clamp(losses-self.clip_loss, min=0).mean()
+            loss, metrics, losses = self.get_batch_loss_metrics(model, inputs, train_eval="train", lagrangian=self.dual_lr>0)
+            if self.dual_lr==0 and self.loss_tolerance>0:
+                loss = torch.clamp(losses-self.loss_tolerance, min=0).mean()
 
         # force log the metrics
         self.store_metrics(metrics, train_eval="train")
@@ -1164,7 +1187,7 @@ class DPOTrainer(Trainer):
         prediction_context_manager = torch.cuda.amp.autocast if self._peft_has_been_casted_to_bf16 else nullcontext
 
         with torch.no_grad(), prediction_context_manager():
-            loss, metrics, all_losses = self.get_batch_loss_metrics(model, inputs, train_eval="eval")
+            loss, metrics, all_losses  = self.get_batch_loss_metrics(model, inputs, train_eval="eval")
 
         # force log the metrics
         self.store_metrics(metrics, train_eval="eval")

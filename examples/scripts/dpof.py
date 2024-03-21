@@ -13,7 +13,7 @@
 # limitations under the License.
 """
 # regular:
-python examples/scripts/dpo.py \
+python examples/scripts/dpof.py \
     --model_name_or_path=gpt2 \
     --per_device_train_batch_size 4 \
     --max_steps 1000 \
@@ -29,13 +29,13 @@ python examples/scripts/dpo.py \
     --no_remove_unused_columns
 
 # peft:
-python examples/scripts/dpo.py \
+python examples/scripts/dpof.py \
     --model_name_or_path=gpt2 \
     --per_device_train_batch_size 4 \
     --max_steps 1000 \
     --learning_rate 1e-3 \
     --gradient_accumulation_steps 1 \
-    --logging_steps 10 \
+    --logging_steps 50 \
     --eval_steps 500 \
     --output_dir="dpo_anthropic_hh" \
     --optim rmsprop \
@@ -55,7 +55,8 @@ import torch
 from datasets import Dataset, load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, HfArgumentParser, TrainingArguments
 
-from trl import DPOTrainer, ModelConfig, get_kbit_device_map, get_peft_config, get_quantization_config
+from trl import ModelConfig, get_kbit_device_map, get_peft_config, get_quantization_config
+from trl.trainer import DPOfTrainer as DPOTrainer
 
 import wandb
 
@@ -78,7 +79,9 @@ class ScriptArguments:
         },
     )
     generate_during_eval: bool = field(default=False, metadata={"help": "Generate during evaluation"})
-    clip_loss: float = field(default=1e-3, metadata={"help": "Clip loss value"})
+    dual_lr: float = field(default=1.0, metadata={"help": "Dua; Learning Rate"})
+    resilient_alpha: float = field(default=2.0, metadata={"help": "Dual Weight Decay Coefficient"})
+    loss_tolerance: float = field(default=1e-3, metadata={"help": "Loss Tolerance"})
 
 
 def extract_anthropic_prompt(prompt_and_response):
@@ -160,8 +163,14 @@ if __name__ == "__main__":
     ################
     train_dataset = get_hh("train", sanity_check=args.sanity_check)
     eval_dataset = get_hh("test", sanity_check=args.sanity_check)
-    
-    wandb.init(project="feasible-rlhf", config={**args.__dict__, **training_args.__dict__, **model_config.__dict__, "algorithm": "c-erm" })
+    if args.dual_lr>0:
+        algo = "rfl"
+    elif args.loss_tolerance>0:
+        algo = "clamped-erm"
+    else:
+        algo = "erm"
+
+    wandb.init(project="feasible-rlhf", config={**args.__dict__, **training_args.__dict__, **model_config.__dict__, "algorithm": algo})
 
     ################
     # Training
@@ -179,10 +188,13 @@ if __name__ == "__main__":
         max_prompt_length=args.max_prompt_length,
         generate_during_eval=args.generate_during_eval,
         peft_config=get_peft_config(model_config),
-        clip_loss=args.clip_loss,
+        dual_lr=args.dual_lr,
+        resilient_alpha=args.resilient_alpha,
+        loss_tolerance=args.loss_tolerance,
     )
-    trainer.train()
+    trainer.train()   
     #trainer.save_model(training_args.output_dir)
+    trainer.train_dataset = trainer.train_dataset.remove_columns('indexes')
     results = trainer.evaluation_loop(
         trainer.get_train_dataloader(),
         "eval/train",
@@ -196,3 +208,5 @@ if __name__ == "__main__":
         metric_key_prefix = "eval/val",
     )
     wandb.log(results[2])
+
+    wandb.log({"multipliers/hist": wandb.Histogram(trainer.multipliers.cpu().detach().numpy())})
