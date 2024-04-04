@@ -183,7 +183,8 @@ class DPOfTrainer(Trainer):
         force_use_ref_model: bool = False,
         loss_tolerance: float = 1e-3,
         resilient_alpha: float = 2.0,
-        dual_lr: float = 0.0
+        dual_lr: float = 1.0,
+        algorithm: Literal["feasible", "clamped", "erm"] = "feasible",
     ):
         if model_init_kwargs is None:
             model_init_kwargs = {}
@@ -391,6 +392,7 @@ class DPOfTrainer(Trainer):
         self.loss_tolerance = loss_tolerance
         self.resilient_alpha = resilient_alpha
         self.dual_lr = dual_lr
+        self.algorithm = algorithm
 
         # init multipliers
         self.multipliers = torch.ones(len(train_dataset))
@@ -1109,9 +1111,10 @@ class DPOfTrainer(Trainer):
         compute_loss_context_manager = torch.cuda.amp.autocast if self._peft_has_been_casted_to_bf16 else nullcontext
 
         with compute_loss_context_manager():
-            loss, metrics, losses = self.get_batch_loss_metrics(model, inputs, train_eval="train", lagrangian=self.dual_lr>0)
-            if self.dual_lr==0 and self.loss_tolerance>0:
-                loss = torch.clamp(losses-self.loss_tolerance, min=0).mean()
+            loss, metrics, losses = self.get_batch_loss_metrics(model, inputs, train_eval="train", lagrangian=self.algorithm=="feasible")
+            if self.algorithm=="clamped":
+                loss = torch.square(torch.clamp(losses-self.loss_tolerance, min=0)).mean()
+            
 
         # force log the metrics
         self.store_metrics(metrics, train_eval="train")
