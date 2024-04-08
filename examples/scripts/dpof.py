@@ -64,12 +64,12 @@ import wandb
 @dataclass
 class ScriptArguments:
     beta: float = field(default=0.1, metadata={"help": "the beta parameter for DPO loss"})
-    max_length: int = field(default=512, metadata={"help": "max length of each sample"})
-    max_prompt_length: int = field(default=128, metadata={"help": "max length of each sample's prompt"})
+    max_length: int = field(default=1024, metadata={"help": "max length of each sample"})
+    max_prompt_length: int = field(default=128, metadata={"help": "max length of each sample's prompt"})#128
     max_target_length: int = field(
         default=128, metadata={"help": "Only used for encoder decoder model. Max target of each sample's prompt"}
-    )
-    sanity_check: bool = field(default=True, metadata={"help": "only train on 1000 samples"})
+    )#128
+    sanity_check: bool = field(default=False, metadata={"help": "only train on 1000 samples"})
     ignore_bias_buffers: bool = field(
         default=False,
         metadata={
@@ -80,8 +80,12 @@ class ScriptArguments:
     )
     generate_during_eval: bool = field(default=False, metadata={"help": "Generate during evaluation"})
     dual_lr: float = field(default=1.0, metadata={"help": "Dua; Learning Rate"})
+
     resilient_alpha: float = field(default=2.0, metadata={"help": "Dual Weight Decay Coefficient"})
     loss_tolerance: float = field(default=1e-3, metadata={"help": "Loss Tolerance"})
+    algorithm: str = field(default="erm", metadata={"help": "Algorithm can be 'erm', 'clamped' or 'feasible'"})
+    dataset: str = field(default="hh", metadata={"help": "The dataset to load. Can be 'hh' or 'ultra'."})
+    train_epochs: int = field(default=3, metadata={"help": "Number of training epochs"})
 
 
 def extract_anthropic_prompt(prompt_and_response):
@@ -120,11 +124,32 @@ def get_hh(split: str, sanity_check: bool = False, silent: bool = False, cache_d
 
     return dataset.map(split_prompt_and_responses)
 
+def get_ultra(split: str, sanity_check: bool = False, silent: bool = False, cache_dir: Optional[str] = None) -> Dataset:
+    """Load HuggingFaceH4/ultrafeedback_binarized from Hugging Face. 
+    """
+   
+    dataset = load_dataset("HuggingFaceH4/ultrafeedback_binarized", split=split+"_prefs", cache_dir=cache_dir)
+    if sanity_check:
+        dataset = dataset.select(range(min(len(dataset), 1000)))
+
+    def split_prompt_and_responses(sample) -> Dict[str, str]:
+        return {
+            "prompt": sample["prompt"],
+            "chosen": sample["chosen"][1]["content"],
+            "rejected": sample["rejected"][1]["content"],
+        }
+    dataset = dataset.remove_columns('messages')
+    return dataset.map(split_prompt_and_responses)
+#
+    #return dataset
+
 
 if __name__ == "__main__":
     parser = HfArgumentParser((ScriptArguments, TrainingArguments, ModelConfig))
     args, training_args, model_config = parser.parse_args_into_dataclasses()
-
+    training_args.num_train_epochs = args.train_epochs
+    if hasattr(training_args, "gradient_checkpointing_kwargs"):
+        training_args.gradient_checkpointing_kwargs ={"use_reentrant":  False}
     ################
     # Model & Tokenizer
     ################
@@ -134,6 +159,8 @@ if __name__ == "__main__":
         else getattr(torch, model_config.torch_dtype)
     )
     quantization_config = get_quantization_config(model_config)
+    if hasattr(quantization_config, "bnb_4bit_compute_dtype"):
+        quantization_config.bnb_4bit_compute_dtype=torch.bfloat16
     model_kwargs = dict(
         revision=model_config.model_revision,
         trust_remote_code=model_config.trust_remote_code,
@@ -161,16 +188,14 @@ if __name__ == "__main__":
     ################
     # Dataset
     ################
-    train_dataset = get_hh("train", sanity_check=args.sanity_check)
-    eval_dataset = get_hh("test", sanity_check=args.sanity_check)
-    if args.dual_lr>0:
-        algo = "rfl"
-    elif args.loss_tolerance>0:
-        algo = "clamped-erm"
-    else:
-        algo = "erm"
+    if args.dataset == "hh":
+        train_dataset = get_hh("train", sanity_check=args.sanity_check)
+        eval_dataset = get_hh("test", sanity_check=args.sanity_check)
+    elif args.dataset == "ultra":
+        train_dataset = get_ultra("train", sanity_check=args.sanity_check)
+        eval_dataset = get_ultra("test", sanity_check=args.sanity_check)
 
-    wandb.init(project="feasible-rlhf", config={**args.__dict__, **training_args.__dict__, **model_config.__dict__, "algorithm": algo})
+    wandb.init(project="feasible-rlhf", config={**args.__dict__, **training_args.__dict__, **model_config.__dict__})
 
     ################
     # Training
@@ -191,6 +216,7 @@ if __name__ == "__main__":
         dual_lr=args.dual_lr,
         resilient_alpha=args.resilient_alpha,
         loss_tolerance=args.loss_tolerance,
+        algorithm=args.algorithm,
     )
     trainer.train()   
     #trainer.save_model(training_args.output_dir)
