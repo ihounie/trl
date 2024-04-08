@@ -143,6 +143,59 @@ def get_ultra(split: str, sanity_check: bool = False, silent: bool = False, cach
 #
     #return dataset
 
+def chatml_format(example):
+    """
+    From mlabnonnes example nbook: https://colab.research.google.com/drive/15iFBr1xWgztXvhrj5I9fBv20c7CFOPBE?usp=sharing
+    """
+    # Format system
+    if len(example['system']) > 0:
+        message = {"role": "system", "content": example['system']}
+        system = tokenizer.apply_chat_template([message], tokenize=False)
+    else:
+        system = ""
+
+    # Format instruction
+    message = {"role": "user", "content": example['input']}
+    prompt = tokenizer.apply_chat_template([message], tokenize=False, add_generation_prompt=True)
+
+    # Format chosen answer
+    chosen = example['chosen'] + "<|im_end|>\n"
+
+    # Format rejected answer
+    rejected = example['rejected'] + "<|im_end|>\n"
+
+    return {
+        "prompt": system + prompt,
+        "chosen": chosen,
+        "rejected": rejected,
+    }
+
+def get_orca(split: str, sanity_check: bool = False, silent: bool = False, cache_dir: Optional[str] = None, distilled: bool = True, val_fraction: float = 0.2) -> Dataset:
+    if not distilled:
+        raise NotImplementedError
+    else:
+        dataset = load_dataset("argilla/distilabel-intel-orca-dpo-pairs", split="train", cache_dir=cache_dir)
+        dataset = dataset.filter(
+            lambda r: 
+                r["status"] != "tie" and 
+                r["chosen_score"] >= 8 and 
+                not r["in_gsm8k_train"]
+        )
+        #dataset = dataset.remove_columns(['system', 'generations', 'order', 'labelling_model', 'labelling_prompt', 'raw_labelling_response','rating', 'rationale', 'status', 'original_chosen', 'original_rejected', 'chosen_score', 'in_gsm8k_train'])
+        # Save columns
+        original_columns = dataset.column_names
+        
+        #dataset  = dataset.shuffle()
+        if split=="test":
+            dataset = dataset.select(range(int(len(dataset)*val_fraction)))
+        if split=="train":
+            dataset = dataset.select(range(int(len(dataset)*val_fraction), len(dataset)))
+
+        dataset = dataset.map(chatml_format, remove_columns=original_columns)
+        #dataset = dataset.rename_columns({"question": "input"})
+        #dataset = dataset.remove_columns(['system', 'generations', 'order', 'labelling_model', 'labelling_prompt', 'raw_labelling_response','rating', 'rationale', 'status', 'original_chosen', 'original_rejected', 'chosen_score', 'in_gsm8k_train'])
+        return dataset
+        
 
 if __name__ == "__main__":
     parser = HfArgumentParser((ScriptArguments, TrainingArguments, ModelConfig))
@@ -184,6 +237,10 @@ if __name__ == "__main__":
         model._ddp_params_and_buffers_to_ignore = [
             name for name, buffer in model.named_buffers() if buffer.dtype == torch.bool
         ]
+    if args.dataset == "orca":
+        # from mlabonnes example nbook https://colab.research.google.com/drive/15iFBr1xWgztXvhrj5I9fBv20c7CFOPBE?usp=sharing
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.padding_side = "left"
 
     ################
     # Dataset
@@ -194,6 +251,11 @@ if __name__ == "__main__":
     elif args.dataset == "ultra":
         train_dataset = get_ultra("train", sanity_check=args.sanity_check)
         eval_dataset = get_ultra("test", sanity_check=args.sanity_check)
+    elif args.dataset == "orca":
+        train_dataset = get_orca("train", sanity_check=args.sanity_check)
+        eval_dataset = get_orca("test", sanity_check=args.sanity_check)
+    else:
+        raise NotImplementedError
 
     wandb.init(project="feasible-rlhf", config={**args.__dict__, **training_args.__dict__, **model_config.__dict__})
 
