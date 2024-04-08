@@ -223,6 +223,7 @@ if __name__ == "__main__":
         device_map=get_kbit_device_map() if quantization_config is not None else None,
         quantization_config=quantization_config,
     )
+    #model_kwargs["torch_dtype"] = torch.bfloat16
     model = AutoModelForCausalLM.from_pretrained(model_config.model_name_or_path, **model_kwargs)
     peft_config = get_peft_config(model_config)
     if peft_config is None:
