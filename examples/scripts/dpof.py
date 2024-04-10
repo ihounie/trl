@@ -192,6 +192,8 @@ def get_orca(split: str, sanity_check: bool = False, silent: bool = False, cache
             dataset = dataset.select(range(int(len(dataset)*val_fraction), len(dataset)))
 
         dataset = dataset.map(chatml_format, remove_columns=original_columns)
+        if sanity_check:
+            dataset = dataset.select(range(min(len(dataset), 16)))
         #dataset = dataset.rename_columns({"question": "input"})
         #dataset = dataset.remove_columns(['system', 'generations', 'order', 'labelling_model', 'labelling_prompt', 'raw_labelling_response','rating', 'rationale', 'status', 'original_chosen', 'original_rejected', 'chosen_score', 'in_gsm8k_train'])
         return dataset
@@ -289,13 +291,13 @@ if __name__ == "__main__":
         "eval/train",
         metric_key_prefix = "eval/train",
     )
-    wandb.log(results[2])
+    #wandb.log(results[2])
 
     results = trainer.evaluation_loop(
         trainer.get_eval_dataloader(),
         "eval/val",
         metric_key_prefix = "eval/val",
     )
-    wandb.log(results[2])
+    #wandb.log(results[2])
 
     wandb.log({"multipliers/hist": wandb.Histogram(trainer.multipliers.cpu().detach().numpy())})

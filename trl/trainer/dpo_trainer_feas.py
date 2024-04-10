@@ -1264,7 +1264,9 @@ class DPOfTrainer(Trainer):
         #return initial_output
         args = self.args
 
-        prediction_loss_only = prediction_loss_only if prediction_loss_only is not None else args.prediction_loss_only
+        # TODO(IH): this is a temporary fix
+        #prediction_loss_only = prediction_loss_only if prediction_loss_only is not None else args.prediction_loss_only
+        prediction_loss_only = False
 
         # if eval is called w/o train, handle model prep here
         if self.is_deepspeed_enabled and self.deepspeed is None:
@@ -1467,7 +1469,9 @@ class DPOfTrainer(Trainer):
             if not key.startswith(f"{metric_key_prefix}_"):
                 metrics[f"{metric_key_prefix}_{key}"] = metrics.pop(key)
         
-
+        # Log the metrics
+        self.log(metrics)
+        self.log({"multipliers/hist": wandb.Histogram(self.multipliers.cpu().detach().numpy())})
         return EvalLoopOutput(predictions=all_preds, label_ids=all_labels, metrics=metrics, num_samples=num_samples)
 
 
