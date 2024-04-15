@@ -19,6 +19,7 @@ from collections import defaultdict
 from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from functools import wraps
+import os
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
 import numpy as np
@@ -510,9 +511,11 @@ class DPOfTrainer(Trainer):
             )
 
             self._precomputed_train_ref_log_probs = True
-        # add indexes
-        indexes = np.arange(len(self.train_dataset))
-        self.train_dataset = self.train_dataset.add_column(name="indexes", column=indexes)
+        # check if dset has indexes
+        if "indexes" not in self.train_dataset.column_names:
+            # add indexes
+            indexes = np.arange(len(self.train_dataset))
+            self.train_dataset = self.train_dataset.add_column(name="indexes", column=indexes)
 
         return super().get_train_dataloader()
 
@@ -1212,6 +1215,73 @@ class DPOfTrainer(Trainer):
     def store_metrics(self, metrics: Dict[str, float], train_eval: Literal["train", "eval"] = "train") -> None:
         for key, value in metrics.items():
             self._stored_metrics[train_eval][key].append(value)
+    
+    def evaluate(
+        self,
+        eval_dataset: Optional[Union[Dataset, Dict[str, Dataset]]] = None,
+        ignore_keys: Optional[List[str]] = None,
+        metric_key_prefix: str = "eval",
+    ) -> Dict[str, float]:
+        """
+        Run evaluation and returns metrics.
+
+        The calling script will be responsible for providing a method to compute metrics, as they are task-dependent
+        (pass it to the init `compute_metrics` argument).
+
+        You can also subclass and override this method to inject custom behavior.
+
+        Args:
+            eval_dataset (Union[`Dataset`, Dict[str, `Dataset`]), *optional*):
+                Pass a dataset if you wish to override `self.eval_dataset`. If it is a [`~datasets.Dataset`], columns
+                not accepted by the `model.forward()` method are automatically removed. If it is a dictionary, it will
+                evaluate on each dataset, prepending the dictionary key to the metric name. Datasets must implement the
+                `__len__` method.
+
+                <Tip>
+
+                If you pass a dictionary with names of datasets as keys and datasets as values, evaluate will run
+                separate evaluations on each dataset. This can be useful to monitor how training affects other
+                datasets or simply to get a more fine-grained evaluation.
+                When used with `load_best_model_at_end`, make sure `metric_for_best_model` references exactly one
+                of the datasets. If you, for example, pass in `{"data1": data1, "data2": data2}` for two datasets
+                `data1` and `data2`, you could specify `metric_for_best_model="eval_data1_loss"` for using the
+                loss on `data1` and `metric_for_best_model="eval_data1_loss"` for the loss on `data2`.
+
+                </Tip>
+
+            ignore_keys (`List[str]`, *optional*):
+                A list of keys in the output of your model (if it is a dictionary) that should be ignored when
+                gathering predictions.
+            metric_key_prefix (`str`, *optional*, defaults to `"eval"`):
+                An optional prefix to be used as the metrics key prefix. For example the metrics "bleu" will be named
+                "eval_bleu" if the prefix is "eval" (default)
+
+        Returns:
+            A dictionary containing the evaluation loss and the potential metrics computed from the predictions. The
+            dictionary also contains the epoch number which comes from the training state.
+        """
+
+        # memory metrics - must set up as early as possible
+        self._memory_tracker.start()
+        train_dataloader = self.get_train_dataloader()
+        output = self.evaluation_loop(
+            train_dataloader,
+            "eval/train",
+            metric_key_prefix="eval/train",
+        )
+
+        eval_dataloader = self.get_eval_dataloader()
+        output = self.evaluation_loop(
+            eval_dataloader,
+            "eval/val",
+            metric_key_prefix="eval/val",
+        )
+
+        self.control = self.callback_handler.on_evaluate(self.args, self.state, self.control, output.metrics)
+
+        self._memory_tracker.stop_and_update_metrics(output.metrics)
+
+        return output.metrics
 
     def evaluation_loop(
         self,
@@ -1458,8 +1528,6 @@ class DPOfTrainer(Trainer):
             metrics[f"{metric_key_prefix}_loss/max"] = all_losses.max().item()
             metrics[f"{metric_key_prefix}_loss/min"] = all_losses.min().item()
             metrics[f"{metric_key_prefix}_loss/std"] = all_losses.std().item()
-            # log loss histogram
-            metrics[f"{metric_key_prefix}_loss/hist"] = wandb.Histogram(all_losses)
 
         if hasattr(self, "jit_compilation_time"):
             metrics[f"{metric_key_prefix}_jit_compilation_time"] = self.jit_compilation_time
@@ -1471,7 +1539,26 @@ class DPOfTrainer(Trainer):
         
         # Log the metrics
         self.log(metrics)
-        self.log({"multipliers/hist": wandb.Histogram(self.multipliers.cpu().detach().numpy())})
+
+        if all_losses is not None:
+            # log histograms
+            # log loss histogram
+            self.log({f"{metric_key_prefix}_loss/hist":wandb.Histogram(all_losses)})
+            if "train" in metric_key_prefix:
+                self.log({"multipliers/hist": wandb.Histogram(self.multipliers.cpu().detach().numpy())})
+                multipliers_folder = self.args.output_dir
+                file_path = os.path.join(multipliers_folder, f"multipliers_epoch_{wandb.summary['train/epoch']}.pt")
+                os.makedirs(multipliers_folder, exist_ok=True)
+                torch.save(np.half(self.multipliers.cpu().detach().numpy()), file_path)
+                wandb.save(file_path, base_path=multipliers_folder)
+            # log losses
+            #self.log({f"{metric_key_prefix}_losses": all_losses})
+            losses_folder = self.args.output_dir
+            file_path = os.path.join(losses_folder, f"{metric_key_prefix.replace('/', '_')}_losses_epoch_{wandb.summary['train/epoch']}.pt")
+            os.makedirs(losses_folder, exist_ok=True)
+            torch.save(np.half(all_losses), file_path)
+            wandb.save(file_path, base_path=losses_folder)
+
         return EvalLoopOutput(predictions=all_preds, label_ids=all_labels, metrics=metrics, num_samples=num_samples)
 
 
