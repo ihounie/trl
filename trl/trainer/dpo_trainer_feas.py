@@ -1543,9 +1543,9 @@ class DPOfTrainer(Trainer):
         if all_losses is not None:
             # log histograms
             # log loss histogram
-            self.log({f"{metric_key_prefix}_loss/hist":wandb.Histogram(all_losses)})
+            wandb.log({f"{metric_key_prefix}_loss/hist":wandb.Histogram(all_losses)})
             if "train" in metric_key_prefix:
-                self.log({"multipliers/hist": wandb.Histogram(self.multipliers.cpu().detach().numpy())})
+                wandb.log({"multipliers/hist": wandb.Histogram(self.multipliers.cpu().detach().numpy())})
                 multipliers_folder = self.args.output_dir
                 file_path = os.path.join(multipliers_folder, f"multipliers_epoch_{wandb.summary['train/epoch']}.pt")
                 os.makedirs(multipliers_folder, exist_ok=True)
