@@ -1089,10 +1089,11 @@ class DPOfTrainer(Trainer):
         metrics[f"{prefix}logits/chosen"] = policy_chosen_logits.detach().mean().cpu()
 
         if lagrangian:
+            slacks = losses.detach().to(self.multipliers.device)-self.loss_tolerance
             losses = losses*self.multipliers[batch["indexes"]].to(losses.device)
             # update multiplier
             with torch.no_grad():
-                self.multipliers[batch["indexes"]] = self.multipliers[batch["indexes"]] + self.dual_lr * (losses.to(self.multipliers.device)-self.loss_tolerance-self.multipliers[batch["indexes"]]/self.resilient_alpha)
+                self.multipliers[batch["indexes"]] = self.multipliers[batch["indexes"]] + self.dual_lr * (slacks-self.multipliers[batch["indexes"]]/self.resilient_alpha)
                 # clip at zero
                 self.multipliers[batch["indexes"]] = torch.clip(self.multipliers[batch["indexes"]], min=0)
 
