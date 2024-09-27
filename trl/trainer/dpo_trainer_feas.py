@@ -1541,24 +1541,6 @@ class DPOfTrainer(Trainer):
         # Log the metrics
         self.log(metrics)
 
-        if all_losses is not None:
-            # log histograms
-            # log loss histogram
-            wandb.log({f"{metric_key_prefix}_loss/hist":wandb.Histogram(all_losses)})
-            if "train" in metric_key_prefix:
-                wandb.log({"multipliers/hist": wandb.Histogram(self.multipliers.cpu().detach().numpy())})
-                multipliers_folder = self.args.output_dir
-                file_path = os.path.join(multipliers_folder, f"multipliers_epoch_{wandb.summary['train/epoch']}.pt")
-                os.makedirs(multipliers_folder, exist_ok=True)
-                torch.save(np.half(self.multipliers.cpu().detach().numpy()), file_path)
-                wandb.save(file_path, base_path=multipliers_folder)
-            # log losses
-            #self.log({f"{metric_key_prefix}_losses": all_losses})
-            losses_folder = self.args.output_dir
-            file_path = os.path.join(losses_folder, f"{metric_key_prefix.replace('/', '_')}_losses_epoch_{wandb.summary['train/epoch']}.pt")
-            os.makedirs(losses_folder, exist_ok=True)
-            torch.save(np.half(all_losses), file_path)
-            wandb.save(file_path, base_path=losses_folder)
 
         return EvalLoopOutput(predictions=all_preds, label_ids=all_labels, metrics=metrics, num_samples=num_samples)
 

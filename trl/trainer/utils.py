@@ -29,7 +29,7 @@ from ..trainer.model_config import ModelConfig
 
 
 if is_peft_available():
-    from peft import LoraConfig, PeftConfig
+    from peft import LoraConfig, LorTaConfig, PeftConfig
 
 
 class AdaptiveKLController:
@@ -720,15 +720,31 @@ def get_peft_config(model_config: ModelConfig) -> "Optional[PeftConfig]":
             "You need to have PEFT library installed in your environment, make sure to install `peft`. "
             "Make sure to run `pip install -U peft`."
         )
+    
+    if model_config.adapter_type == "lora":
 
-    peft_config = LoraConfig(
-        r=model_config.lora_r,
-        lora_alpha=model_config.lora_alpha,
-        lora_dropout=model_config.lora_dropout,
-        bias="none",
-        task_type=model_config.lora_task_type,
-        target_modules=model_config.lora_target_modules,
-        modules_to_save=model_config.lora_modules_to_save,
-    )
+        peft_config = LoraConfig(
+            r=model_config.lora_r,
+            lora_alpha=model_config.lora_alpha,
+            lora_dropout=model_config.lora_dropout,
+            bias="none",
+            task_type=model_config.lora_task_type,
+            target_modules=model_config.lora_target_modules,
+            modules_to_save=model_config.lora_modules_to_save,
+        )
+    elif model_config.adapter_type == "lorta":
+        peft_config = LorTaConfig(
+            r = model_config.lora_r,
+            lora_alpha=model_config.lora_alpha,
+            lora_dropout=model_config.lora_dropout,
+            bias="none",
+            task_type=model_config.lora_task_type,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+            modules_to_save=model_config.lora_modules_to_save,
+        )
+
+    else:
+
+        raise NotImplementedError
 
     return peft_config

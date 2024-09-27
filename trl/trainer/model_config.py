@@ -41,6 +41,10 @@ class ModelConfig:
         default=False,
         metadata={"help": ("Whether to use PEFT or not for training.")},
     )
+    adapter_type: str = field(
+        default="lora",
+        metadata={"help": ("Whether to use LoRA or another adapter type.")},
+    )
     lora_r: Optional[int] = field(
         default=16,
         metadata={"help": ("LoRA R value.")},

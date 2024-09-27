@@ -50,6 +50,7 @@ python examples/scripts/dpof.py \
 """
 from dataclasses import dataclass, field
 from typing import Dict, Optional
+import os
 
 import torch
 from datasets import Dataset, load_dataset
@@ -260,7 +261,7 @@ if __name__ == "__main__":
     else:
         raise NotImplementedError
 
-    wandb.init(project="feasible-rlhf", config={**args.__dict__, **training_args.__dict__, **model_config.__dict__})
+    wandb.init(project="lorta-rlhf", config={**args.__dict__, **training_args.__dict__, **model_config.__dict__})
 
     ################
     # Training
@@ -298,6 +299,12 @@ if __name__ == "__main__":
         "eval/val",
         metric_key_prefix = "eval/val",
     )
+    save_path = os.path.join(training_args.output_dir, f"{model_config.model_name_or_path}_{model_config.adapter_type}_r_{model_config.lora_r}_alpha_{model_config.lora_alpha}")
+    trainer.save_model(save_path)
+    #model.save_pretrained(save_path)
+    #tokenizer.save_pretrained(save_path)
+
+    #model.push_to_hub(f"ihounie/llama2-dpo-lorta/{model_config.adapter_type}-r{model_config.lora_r}-a{model_config.lora_alpha}") 
     #wandb.log(results[2])
 
-    wandb.log({"multipliers/hist": wandb.Histogram(trainer.multipliers.cpu().detach().numpy())})
+    #wandb.log({"multipliers/hist": wandb.Histogram(trainer.multipliers.cpu().detach().numpy())})
