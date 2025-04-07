@@ -1090,7 +1090,10 @@ class DPOfTrainer(Trainer):
 
         if lagrangian:
             slacks = losses.detach().to(self.multipliers.device)-self.loss_tolerance
-            losses = losses*self.multipliers[batch["indexes"]].to(losses.device)
+            if self.algorithm=="feasible":
+                losses = losses*self.multipliers[batch["indexes"]].to(losses.device)
+            elif self.algorithm=="pwr":
+                losses = losses*(self.multipliers[batch["indexes"]].to(losses.device)+1/len(losses))
             # update multiplier
             with torch.no_grad():
                 self.multipliers[batch["indexes"]] = self.multipliers[batch["indexes"]] + self.dual_lr * (slacks-self.multipliers[batch["indexes"]]/self.resilient_alpha)
@@ -1115,7 +1118,7 @@ class DPOfTrainer(Trainer):
         compute_loss_context_manager = torch.cuda.amp.autocast if self._peft_has_been_casted_to_bf16 else nullcontext
 
         with compute_loss_context_manager():
-            loss, metrics, losses = self.get_batch_loss_metrics(model, inputs, train_eval="train", lagrangian=self.algorithm=="feasible")
+            loss, metrics, losses = self.get_batch_loss_metrics(model, inputs, train_eval="train", lagrangian=(self.algorithm in ["feasible", "pwr"]))
             if self.algorithm=="clamped":
                 loss = torch.square(torch.clamp(losses-self.loss_tolerance, min=0)).mean()
             
